@@ -1,0 +1,182 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Prisma Schema for TrustPay
+//
+// Prisma is an ORM (Object-Relational Mapper). Instead of writing raw SQL,
+// you define your tables here and Prisma generates type-safe TypeScript code.
+//
+// To apply this schema to the database: npx prisma migrate dev
+// To explore the database visually:     npx prisma studio
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── MODELS (Tables) ─────────────────────────────────────────────────────────
+
+model User {
+  id            Int      @id @default(autoincrement())
+  email         String   @unique
+  name          String
+  passwordHash  String   // bcrypt hash — we NEVER store plain passwords
+  role          String   // "CLIENT" | "FREELANCER" | "MEDIATOR"
+  // ⚠️ walletBalance is stored in PAISE (smallest unit of INR).
+  // ₹1 = 100 paise. We use integers to avoid floating-point rounding bugs.
+  // e.g., ₹500 is stored as 50000
+  walletBalance Int      @default(0)
+  createdAt     DateTime @default(now())
+
+  // Relations — Prisma knows how to JOIN these automatically
+  clientProjects     Project[]     @relation("ClientProjects")
+  freelancerProjects Project[]     @relation("FreelancerProjects")
+  ledgerFrom         Ledger[]      @relation("LedgerFrom")
+  ledgerTo           Ledger[]      @relation("LedgerTo")
+  chatMessages       ChatMessage[]
+  notifications      Notification[]
+  raisedDisputes     Dispute[]     @relation("RaisedBy")
+  resolvedDisputes   Dispute[]     @relation("ResolvedBy")
+}
+
+model Project {
+  id           Int           @id @default(autoincrement())
+  title        String
+  description  String
+  status       String        @default("DRAFT") // "DRAFT" | "ACTIVE" | "COMPLETED" | "CANCELLED"
+  totalBudget  Int           // paise
+  clientId     Int
+  freelancerId Int
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  client       User          @relation("ClientProjects",    fields: [clientId],     references: [id])
+  freelancer   User          @relation("FreelancerProjects", fields: [freelancerId], references: [id])
+  milestones   Milestone[]
+  contract     Contract?     // one-to-one: each project has at most one contract
+  chatMessages ChatMessage[]
+  ledger       Ledger[]
+  invoices     Invoice[]
+}
+
+model Contract {
+  id                   Int       @id @default(autoincrement())
+  projectId            Int       @unique // one contract per project
+  text                 String    // full human-readable contract markdown
+  hash                 String    // SHA-256 of text — proves it wasn't tampered with
+  // Client signature fields
+  clientSigned         Boolean   @default(false)
+  clientSignedName     String?
+  clientSignedAt       DateTime?
+  clientIp             String?
+  // Freelancer signature fields
+  freelancerSigned     Boolean   @default(false)
+  freelancerSignedName String?
+  freelancerSignedAt   DateTime?
+  freelancerIp         String?
+  // Once locked = true, the scope cannot be changed without a new amendment
+  locked               Boolean   @default(false)
+  createdAt            DateTime  @default(now())
+
+  project Project @relation(fields: [projectId], references: [id])
+}
+
+model Milestone {
+  id             Int             @id @default(autoincrement())
+  projectId      Int
+  order          Int             // 1, 2, 3... — display order
+  title          String
+  description    String
+  deliverables   String          // comma-separated list of things to deliver
+  amount         Int             // paise — how much is locked for this milestone
+  status         String          @default("PENDING") // "PENDING" | "FUNDED" | "IN_PROGRESS" | "SUBMITTED" | "APPROVED" | "RELEASED" | "REJECTED" | "DISPUTED"
+  submissionNote String?         // freelancer's note when submitting
+  submissionLink String?         // link to delivered work (GitHub, Drive, etc.)
+  dueDate        DateTime?
+  // When a milestone enters SUBMITTED state, we set this to now() + AUTO_APPROVE_DAYS.
+  // A background job checks this and auto-approves if the client hasn't responded.
+  autoApproveAt  DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  project  Project   @relation(fields: [projectId], references: [id])
+  ledger   Ledger[]
+  dispute  Dispute?  // at most one dispute per milestone
+  invoice  Invoice?  // at most one invoice per milestone (generated on RELEASE)
+}
+
+model Ledger {
+  id          Int        @id @default(autoincrement())
+  type        String     // "DEPOSIT" | "LOCK" | "RELEASE" | "REFUND" | "SPLIT"
+  amount      Int        // paise — always positive
+  fromUserId  Int?       // null for system-generated deposits
+  toUserId    Int?       // null for refunds going back to system
+  projectId   Int?
+  milestoneId Int?
+  note        String     // human-readable description e.g. "Released for Milestone 1"
+  // createdAt is set once and NEVER changed — the ledger is immutable
+  createdAt   DateTime   @default(now())
+
+  fromUser  User?      @relation("LedgerFrom", fields: [fromUserId],  references: [id])
+  toUser    User?      @relation("LedgerTo",   fields: [toUserId],    references: [id])
+  project   Project?   @relation(fields: [projectId],   references: [id])
+  milestone Milestone? @relation(fields: [milestoneId], references: [id])
+}
+
+model Dispute {
+  id           Int                @id @default(autoincrement())
+  milestoneId  Int                @unique // one dispute per milestone
+  raisedById   Int
+  status       String             @default("OPEN") // "OPEN" | "RESOLVED"
+  reason       String             // why the dispute was raised
+  resolution   String?            // "RELEASE" | "REFUND" | "SPLIT"
+  // If resolution = SPLIT, this is the % going to the freelancer (0–100)
+  splitPercent Int?
+  resolvedById Int?               // mediator who resolved it
+  createdAt    DateTime           @default(now())
+  resolvedAt   DateTime?
+
+  milestone  Milestone @relation(fields: [milestoneId],  references: [id])
+  raisedBy   User      @relation("RaisedBy",  fields: [raisedById],   references: [id])
+  resolvedBy User?     @relation("ResolvedBy", fields: [resolvedById], references: [id])
+}
+
+model ChatMessage {
+  id        Int      @id @default(autoincrement())
+  projectId Int
+  senderId  Int
+  text      String
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id])
+  sender  User    @relation(fields: [senderId],  references: [id])
+}
+
+model Invoice {
+  id            Int      @id @default(autoincrement())
+  invoiceNumber String   @unique // e.g. "INV-0001"
+  milestoneId   Int      @unique // one invoice per milestone
+  projectId     Int
+  clientId      Int
+  freelancerId  Int
+  amount        Int      // paise — same as milestone amount
+  pdfPath       String   // path to generated PDF on disk
+  issuedAt      DateTime @default(now())
+
+  milestone Milestone @relation(fields: [milestoneId], references: [id])
+  project   Project   @relation(fields: [projectId],   references: [id])
+}
+
+model Notification {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  message   String
+  read      Boolean  @default(false)
+  link      String?  // e.g. "/projects/3/milestones/7" — where to navigate on click
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+}
