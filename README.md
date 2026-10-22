@@ -1,3 +1,6 @@
+# Trustpay
+Trust-Bound Freelance Escrow &amp; Invoicing platform
+
 # TrustPay — Trust-Bound Freelance Escrow & Invoicing Platform
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.3-blue.svg)](https://www.typescriptlang.org/)
